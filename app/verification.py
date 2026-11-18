@@ -46,6 +46,16 @@ def generate_inputs(req: VerifyRequest) -> GeneratedData:
     )
 
 
+def generate_qk(seed: int, doc_lengths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+    """只生成 Q/K，且与 :func:`generate_inputs` 对同一 seed/长度逐位相同。"""
+    g = torch.Generator(device="cpu")
+    g.manual_seed(int(seed))
+    n = sum(doc_lengths)
+    q = torch.randn(n, HEAD_DIM, generator=g, dtype=torch.float64)
+    k = torch.randn(n, HEAD_DIM, generator=g, dtype=torch.float64)
+    return q, k
+
+
 def _max_abs(a: torch.Tensor, b: torch.Tensor) -> float:
     return float(torch.max(torch.abs(a - b)).item())
 

@@ -5,17 +5,28 @@
 * ``GET  /health``           健康检查
 * ``GET  /scenarios``        内置边界情形样例列表
 * ``POST /verify``           单次核对（自定义分块算子 vs 独立稠密参考）
+* ``POST /winner-stability`` 低精度误差预算下各查询原赢家 key 的稳定性
 * ``POST /scenarios/run``    运行全部或单个内置样例
 * ``GET  /docs``             Swagger UI（自动生成）
 """
 
 from __future__ import annotations
 
-from fastapi import FastAPI, Query
+import math
+
+from fastapi import FastAPI, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .scenarios import SCENARIOS
-from .schemas import VerifyRequest, VerifyResponse
+from .schemas import (
+    VerifyRequest,
+    VerifyResponse,
+    WinnerStabilityRequest,
+    WinnerStabilityResponse,
+)
+from .stability import analyze_winner_stability
 from .verification import TOLERANCE, run_verification
 
 app = FastAPI(
@@ -32,6 +43,27 @@ app = FastAPI(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def _json_safe(value):
+    """把 NaN/Inf 等非 JSON 合规值递归替换为字符串，避免 422 响应序列化失败。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _json_safe(jsonable_encoder(exc.errors()))},
+    )
 
 
 @app.get("/scenarios")
@@ -55,6 +87,22 @@ def verify(
     result = run_verification(req, include_tensors=include_tensors)
     # 核对失败属于业务结果而非服务错误：返回 200 并在体内明确 passed=false。
     return result
+
+
+@app.post(
+    "/winner-stability",
+    response_model=WinnerStabilityResponse,
+    summary="低精度误差预算下的注意力赢家稳定性",
+    description=(
+        "沿用 /verify 的 Q/K 生成方式（同 seed 与文档长度得到逐位相同的 float64 "
+        "Q/K）。给定块长、1~8 个互不相同的查询位置与每分量误差上限 ε，逐查询判断"
+        "仅缩小到自身文档内不晚于自己的 key 时，原 QK 点积赢家在所有允许扰动下"
+        "是否不变。稳定时返回优势下界；不稳定时返回界内改动位置、新值与重算赢家；"
+        "float64 无法可靠复现时明确标注未确定。"
+    ),
+)
+def winner_stability(req: WinnerStabilityRequest) -> WinnerStabilityResponse:
+    return analyze_winner_stability(req)
 
 
 @app.post("/scenarios/run")
